@@ -1,110 +1,104 @@
-const { GoogleGenerativeAI, HarmCategory, HarmBlockThreshold } = require("@google/generative-ai");
 const express = require('express');
-const util = require('util');
+
 const app = express();
-const http = require('http');
-const server = http.createServer(app);
-const { Server } = require("socket.io");
-const io = new Server(server);
-const genAI = new GoogleGenerativeAI(process.env.AIzaSyCGdzXsekMM-O3OOLLQ-NE6B0r7Q2JcG1c);
-const fs = require('fs'); // Import the file system module
-const apiVersion = 'v1beta';
-const generationConfig = {
-      temperature: 0.0,
-    };
-const safetySettings = [
-      {
-        category: HarmCategory.HARM_CATEGORY_HARASSMENT, threshold: HarmBlockThreshold.BLOCK_NONE,
-      },
-      {
-        category: HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold: HarmBlockThreshold.BLOCK_NONE,
-      },
-      {
-        category: HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold: HarmBlockThreshold.BLOCK_NONE,
-      },
-      {
-        category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold: HarmBlockThreshold.BLOCK_NONE,
-      },
-    ];
+app.use(express.json({ limit: '1mb' }));
+app.use(express.static(__dirname));
 
-// Function to read system text from file
-async function readSystemTextFromFile(filePath) {
-  try {
-    const data = await fs.promises.readFile(filePath, 'utf-8');
-    return data.trim();
-  } catch (err) {
-    console.error("Error reading system text file:", err);
-    throw err; // Re-throw to allow handling in the calling code
+const categories = [
+  { id: 'in-conclusion', name: 'In-Conclusion Framing', patterns: [/\bin conclusion\b/gi, /\bto conclude\b/gi, /\bin summary\b/gi] },
+  { id: 'furthermore', name: 'Transition Overuse', patterns: [/\bfurthermore\b/gi, /\bmoreover\b/gi, /\badditionally\b/gi] },
+  { id: 'delve', name: 'Delve Verb', patterns: [/\bdelve\b/gi, /\bdelves\b/gi, /\bdelving\b/gi] },
+  { id: 'tapestry', name: 'Tapestry Metaphor', patterns: [/\btapestry\b/gi, /\bintricately woven\b/gi] },
+  { id: 'landscape', name: 'Landscape Cliche', patterns: [/\b(?:digital|modern|evolving|dynamic) landscape\b/gi] },
+  { id: 'crucial', name: 'Crucial/Paramount Intensifiers', patterns: [/\bcrucial\b/gi, /\bparamount\b/gi, /\bvital\b/gi] },
+  { id: 'embark', name: 'Embark/Journey Framing', patterns: [/\bembark\b/gi, /\bjourney\b/gi, /\bnavigate\b/gi] },
+  { id: 'unlock', name: 'Unlock Potential Framing', patterns: [/\bunlock(?:ing)?\b/gi, /\bpotential\b/gi] },
+  { id: 'realm', name: 'Realm Terminology', patterns: [/\brealm\b/gi, /\bsphere\b/gi, /\bdomain\b/gi] },
+  { id: 'elevate', name: 'Elevate/Leverage Business-speak', patterns: [/\belevate\b/gi, /\bleverage\b/gi, /\benhance\b/gi] },
+  { id: 'underscore', name: 'Underscore/Highlight Verbs', patterns: [/\bunderscore\b/gi, /\bhighlights?\b/gi] },
+  { id: 'testament', name: 'Testament Construction', patterns: [/\ba testament to\b/gi] },
+  { id: 'seamless', name: 'Seamless Adjective', patterns: [/\bseamless\b/gi, /\beffortless\b/gi] },
+  { id: 'robust', name: 'Robust Solution Cliche', patterns: [/\brobust\b/gi, /\bcomprehensive\b/gi] },
+  { id: 'it-is-important', name: 'It Is Important To', patterns: [/\bit is important to\b/gi, /\bit is essential to\b/gi] },
+  { id: 'not-only-but-also', name: 'Not Only...But Also', patterns: [/\bnot only\b[\s\S]{0,50}?\bbut also\b/gi] },
+  { id: 'today-world', name: 'In Today\'s World', patterns: [/\bin today'?s world\b/gi, /\bin the modern era\b/gi] },
+  { id: 'whether-you', name: 'Whether You\'re...', patterns: [/\bwhether you(?: are|'re)\b/gi] },
+  { id: 'let-us', name: 'Let\'s Explore Prompting', patterns: [/\blet'?s explore\b/gi, /\blet'?s dive in\b/gi] },
+  { id: 'overall', name: 'Overall/Ultimately Wrap-up', patterns: [/\boverall\b/gi, /\bultimately\b/gi] },
+  { id: 'repetitive-hedging', name: 'Hedging Fillers', patterns: [/\bit is worth noting that\b/gi, /\barguably\b/gi, /\bnotably\b/gi] },
+];
+
+const replacements = [
+  ['in conclusion', ''], ['to conclude', ''], ['in summary', ''], ['furthermore', 'also'], ['moreover', 'also'],
+  ['additionally', 'also'], ['delve into', 'look at'], ['delve', 'look'], ['tapestry', 'mix'], ['intricately woven', 'connected'],
+  ['landscape', 'environment'], ['crucial', 'important'], ['paramount', 'important'], ['vital', 'important'], ['embark on', 'start'],
+  ['journey', 'process'], ['navigate', 'handle'], ['unlock', 'use'], ['potential', 'opportunity'], ['realm', 'area'],
+  ['sphere', 'area'], ['domain', 'field'], ['elevate', 'improve'], ['leverage', 'use'], ['enhance', 'improve'],
+  ['underscore', 'show'], ['highlights', 'shows'], ['highlight', 'show'], ['a testament to', 'evidence of'], ['seamless', 'smooth'],
+  ['effortless', 'simple'], ['robust', 'solid'], ['comprehensive', 'thorough'], ['it is important to', 'you should'],
+  ['it is essential to', 'you should'], ['not only', ''], ['but also', 'and'], ["in today's world", 'today'], ['in the modern era', 'today'],
+  ["whether you're", 'if you are'], ['let\'s explore', 'here is'], ["let's dive in", 'here is'], ['overall', ''], ['ultimately', ''],
+];
+
+function detect(text) {
+  const flags = [];
+  for (const cat of categories) {
+    let hits = 0;
+    const highlights = [];
+    for (const pattern of cat.patterns) {
+      pattern.lastIndex = 0;
+      let match;
+      while ((match = pattern.exec(text)) !== null) {
+        hits += 1;
+        highlights.push({ start: match.index, end: match.index + match[0].length, text: match[0] });
+      }
+    }
+    const confidence = Math.min(0.99, hits === 0 ? 0 : 0.2 + hits * 0.16);
+    flags.push({ id: cat.id, name: cat.name, hits, confidence, highlights });
   }
+  return flags;
 }
 
-app.get('/', (req, res) => {
-  res.sendFile(__dirname + '/index.html'); // Serve your HTML file
-});
-
-io.on('connection', async (socket) => {
-  console.log('User connected');
-
-  try {
-    // Read system text from file asynchronously
-    const systemText = await readSystemTextFromFile("systemi.txt");
-    // let systemText = "";
-    const systemInstruction = { role: "system", parts: [{ text: systemText }] };
-    const model = genAI.getGenerativeModel({ model: "gemini-1.5-pro-latest", systemInstruction, generationConfig, safetySettings }, { apiVersion });
-    const chat = model.startChat({});
-
-    socket.on('prompt', async (prompt) => {
-      try {
-        console.log('Message send');
-        const result = await chat.sendMessage(prompt);
-        const response = await result.response;
-        console.log('Response received');
-	// console.log(util.inspect(response.candidates, {showHidden: false, depth: null, colors: true}))
-	if (response.candidates[0].finishReason === 'STOP') {
-		const output = response.text();
-        	socket.emit('response', output);
-		}
-	else {
-		socket.emit('error', 'An error occurred: ' + response.candidates[0].finishReason );
-		}
-      } catch (err) {
-        console.error(err);
-        socket.emit('error', 'An error occurred');
-      }
-    });
-
-    socket.on('history', async () => {
-      try {
-        console.log('History asked');
-        const history = await chat.getHistory();
-        console.log('History received')
-        socket.emit('response', printChatNicely(history));
-      } catch (err) {
-        console.error(err);
-        socket.emit('error', 'An error occurred');
-      }
-    });
-  } catch (err) {
-    console.error("Error initializing chat:", err);
-    socket.emit('error', 'An error occurred during initialization');
+function rewriteText(text) {
+  let rewritten = text;
+  for (const [from, to] of replacements) {
+    rewritten = rewritten.replace(new RegExp(`\\b${from.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'gi'), to);
   }
+  rewritten = rewritten.replace(/\s{2,}/g, ' ').replace(/\s+([,.!?;:])/g, '$1').trim();
+  return rewritten;
+}
 
-  socket.on('disconnect', () => {
-    console.log('User disconnected');
+function detectabilityScore(flags) {
+  const total = flags.reduce((sum, flag) => sum + flag.hits * flag.confidence, 0);
+  return Math.min(100, Math.round(total * 8));
+}
+
+app.post('/api/audit', (req, res) => {
+  const { text = '' } = req.body || {};
+  const originalFlags = detect(text);
+  const rewritten = rewriteText(text);
+  const rewrittenFlags = detect(rewritten);
+
+  res.json({
+    categories: categories.length,
+    replacementRules: replacements.length,
+    original: {
+      text,
+      flags: originalFlags,
+      detectability: detectabilityScore(originalFlags),
+    },
+    rewritten: {
+      text: rewritten,
+      flags: rewrittenFlags,
+      detectability: detectabilityScore(rewrittenFlags),
+    },
   });
 });
 
-// Function to print chat messages
-function printChatNicely(chatHistory) {
-  let formattedHistory = "";  // Initialize an empty string
-  chatHistory.forEach(message => {
-    const role = message.role === 'user' ? 'You:' : 'Gemini:';
-    const text = message.parts[0].text.trim();
-    formattedHistory += `${role} ${text}\n\n`; // Append each message to the string
-  });
-  return formattedHistory;  // Return the complete formatted string
-}
+app.get('*', (_req, res) => {
+  res.sendFile(`${__dirname}/index.html`);
+});
 
-server.listen(3000, () => {
-console.log('Server listening on port 3000');
+app.listen(3000, () => {
+  console.log('AI Writing Auditor listening on http://localhost:3000');
 });

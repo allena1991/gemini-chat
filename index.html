@@ -1,68 +1,92 @@
-<!DOCTYPE html>
-<html lang="tr">
+<!doctype html>
+<html lang="en">
 <head>
-  <title>Gemini 1.5 Pro Chat</title>
-  <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
-  <script src="/socket.io/socket.io.js"></script> 
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AI Writing Auditor</title>
+  <style>
+    body{font-family:Arial,sans-serif;max-width:1100px;margin:20px auto;padding:0 12px;background:#f8f9fb}
+    textarea{width:100%;min-height:180px;padding:12px;font-size:14px}
+    button{padding:10px 14px;margin-right:8px;cursor:pointer}
+    .grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+    .card{background:#fff;border:1px solid #dce2ea;border-radius:8px;padding:12px}
+    .pill{display:inline-block;border-radius:20px;padding:3px 8px;font-size:12px;margin:2px}
+    .high{background:#ffdddd}
+    .medium{background:#fff3cd}
+    .low{background:#d1ecf1}
+    #flags{max-height:330px;overflow:auto}
+    mark{background:#ffe08a;padding:0 1px}
+  </style>
 </head>
 <body>
-  <h1>Gemini 1.5 Pro Chat</h1>
-  <button id="clearButton"> Delete below text</button><br>
-  <textarea id="prompt" rows="20" cols="100" spellcheck="false" ></textarea>
-  <button id="send">Send left prompt</button><br> 
-  <button id="copyButton">Copy below text</button>   <button id="history">Get history</button>
-  <div style="padding:10px; color:black;height:300px; width:840px; white-space:pre-wrap; overflow-y: scroll" id="response" ></div><br>
-  <script>
-    const socket = io();
-    const promptArea = document.getElementById('prompt');
-    const sendButton = document.getElementById('send');
-    const responseArea = document.getElementById('response');
-    const clearButton = document.getElementById('clearButton');
-    const copyButton = document.getElementById('copyButton');
-    const historyButton = document.getElementById('history');
-    let isSending = false; // Flag to track sending status
-	
-    clearButton.addEventListener('click', () => {
-		document.getElementById('prompt').value="";
-		document.getElementById('prompt').focus();
-    });
+  <h1>Interactive AI Writing Auditor</h1>
+  <p>Flags 21 AI-ism categories, suggests rewrites using 43 replacement rules, and compares detectability.</p>
+  <textarea id="input" placeholder="Paste text here..."></textarea>
+  <div style="margin:10px 0">
+    <button id="analyze">Analyze</button>
+    <button id="rewrite">One-click Rewrite</button>
+  </div>
+  <div class="grid">
+    <div class="card">
+      <h3>Original</h3>
+      <div id="originalScore"></div>
+      <div id="originalText"></div>
+    </div>
+    <div class="card">
+      <h3>Rewritten</h3>
+      <div id="rewrittenScore"></div>
+      <div id="rewrittenText"></div>
+    </div>
+  </div>
+  <div class="card" style="margin-top:14px">
+    <h3>Category Flags</h3>
+    <div id="flags"></div>
+  </div>
+<script>
+  let latest;
+  async function audit(){
+    const text = document.getElementById('input').value;
+    const res = await fetch('/api/audit',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text})});
+    latest = await res.json();
+    render(latest);
+  }
 
-    copyButton.addEventListener('click', () => {
-    navigator.clipboard.writeText(document.getElementById("response").innerText);
-    });
+  function renderHighlighted(text, highlights){
+    const sorted = [...highlights].sort((a,b)=>a.start-b.start);
+    let out = '';
+    let i = 0;
+    for (const h of sorted){
+      if (h.start < i) continue;
+      out += escapeHtml(text.slice(i,h.start));
+      out += `<mark title="${escapeHtml(h.text)}">${escapeHtml(text.slice(h.start,h.end))}</mark>`;
+      i = h.end;
+    }
+    out += escapeHtml(text.slice(i));
+    return out;
+  }
 
-    promptArea.addEventListener('keyup', function (event) {
-	if (event.keyCode === 13 && !isSending) { // Only if Enter is pressed and not already sending
-		event.preventDefault();
-		isSending = true; // Set flag to indicate sending is in progress
-		sendButton.disabled = true; 
-		const prompt = promptArea.value;
-		socket.emit('prompt', prompt);
-		}
-	});
+  function escapeHtml(s){return s.replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;"}[c]));}
 
-    historyButton.addEventListener('click', () => {
-      socket.emit('history', prompt);
-    });
+  function render(data){
+    const allHighlights = data.original.flags.flatMap(f=>f.highlights);
+    document.getElementById('originalScore').innerHTML = `<strong>Detectability:</strong> ${data.original.detectability}/100`;
+    document.getElementById('rewrittenScore').innerHTML = `<strong>Detectability:</strong> ${data.rewritten.detectability}/100`;
+    document.getElementById('originalText').innerHTML = `<p>${renderHighlighted(data.original.text, allHighlights)}</p>`;
+    document.getElementById('rewrittenText').textContent = data.rewritten.text;
 
-    sendButton.addEventListener('click', () => {
-	  sendButton.disabled = true; // Disable button immediately on click
-      const prompt = promptArea.value;
-      socket.emit('prompt', prompt);
-    });
+    const flags = data.original.flags.map(f=>{
+      const cls = f.confidence > 0.7 ? 'high' : (f.confidence > 0.4 ? 'medium' : 'low');
+      return `<div><span class="pill ${cls}">${f.name}: ${(f.confidence*100).toFixed(0)}% (${f.hits} hits)</span></div>`;
+    }).join('');
+    document.getElementById('flags').innerHTML = flags;
+  }
 
-    socket.on('response', (response) => {
-      responseArea.innerHTML = response;
-	  sendButton.disabled = false; // Enable button after response is received
-	  isSending = false; // Reset flag after response is received
-    });
-
-    socket.on('error', (error) => {
-      responseArea.innerHTML = error;
-	  sendButton.disabled = false; // Enable button after response is received
-	  isSending = false; // Reset flag after response is received	  
-    });
-	
-  </script>
+  document.getElementById('analyze').onclick = audit;
+  document.getElementById('rewrite').onclick = async ()=>{
+    if (!latest) await audit();
+    document.getElementById('input').value = latest.rewritten.text;
+    await audit();
+  }
+</script>
 </body>
 </html>
